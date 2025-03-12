@@ -1,0 +1,48 @@
+from langchain import LLMChain, PromptTemplate
+from transformers import pipeline, AutoTokenizer, AutoModelForSeq2SeqLM
+from nltk.sentiment import SentimentIntensityAnalyzer
+import pinecone
+from fastapi import FastAPI, HTTPException
+
+app = FastAPI()
+
+sia = SentimentIntensityAnalyzer()
+
+model_name = "facebook/blenderbot-400M-distill"
+tokenizer = AutoTokenizer.from_pretrained(model_name)
+model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
+
+pinecone.init(api_key="YOUR_PINECONE_API_KEY", environment="us-west1-gcp")
+index = pinecone.Index("ai-psychiatrist")
+
+prompt_template = PromptTemplate(
+    input_variables=["user_input"],
+    template="You are an AI psychiatrist trained in CBT. Respond empathetically to: {user_input}"
+)
+chain = LLMChain(prompt=prompt_template, llm=model)
+
+def analyze_emotion(user_input):
+    sentiment = sia.polarity_scores(user_input)
+    mood = "positive" if sentiment['compound'] > 0.05 else "negative" if sentiment['compound'] < -0.05 else "neutral"
+    return mood, sentiment['compound']
+
+def generate_response(user_input):
+    response = chain.run(user_input)
+    return response.strip()
+
+def save_context(user_input, response):
+    index.upsert([(user_input, response)])
+
+@app.post('/chat')
+def chat(user_message: str):
+    try:
+        mood, confidence = analyze_emotion(user_message)
+        response = generate_response(user_message)
+        save_context(user_message, response)
+        return {"mood": mood, "confidence": confidence, "response": response}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
